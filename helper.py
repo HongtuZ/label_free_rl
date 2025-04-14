@@ -1,7 +1,9 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
 import random
+
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.manifold import TSNE
+
 
 def plot_tsne(data, save_path=None):
     """
@@ -19,8 +21,12 @@ def plot_tsne(data, save_path=None):
 
     # 可视化
     plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(X_embedded[:, 0], X_embedded[:, 1], c=y, cmap='tab20', alpha=0.5)
-    plt.colorbar(scatter, label='Label')
+    scatter = plt.scatter(X_embedded[:, 0],
+                          X_embedded[:, 1],
+                          c=y,
+                          cmap="tab20",
+                          alpha=0.5)
+    plt.colorbar(scatter, label="Label")
     plt.title("t-SNE Visualization")
     plt.xlabel("Dimension 1")
     plt.ylabel("Dimension 2")

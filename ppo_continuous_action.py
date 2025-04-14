@@ -18,6 +18,7 @@ from rl.algorithm.ppo import PPOAgent
 
 device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
+
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -44,15 +45,15 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "ant-dir"
+    env_id: str = "point-robot"
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 10000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_vec_envs: int = 2
     """the number of parallel game environments"""
-    num_steps: int = 256
+    num_steps: int = 20
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -87,27 +88,43 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-def evaluate(global_step, make_env, env_id, agent, eval_episodes=3, episode_length=256, video_dir=None):
+
+def evaluate(
+    global_step,
+    make_env,
+    env_id,
+    agent,
+    eval_episodes=3,
+    episode_length=256,
+    video_dir=None,
+):
     if video_dir is not None:
-        env = make_env(env_id, render_mode='rgb_array')()
-        env = gym.wrappers.RecordVideo(env, video_dir, episode_trigger=lambda x: True, name_prefix=f"eval_{global_step}")
+        env = make_env(env_id, render_mode="rgb_array")()
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_dir,
+            episode_trigger=lambda x: True,
+            name_prefix=f"eval_{global_step}",
+        )
     else:
         env = make_env(env_id)()
     total_rewards = 0
     for epoch in range(eval_episodes):
         obs, _ = env.reset()
         for step in range(episode_length):
-            with torch.no_grad():
-                action, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
-            obs, reward, terminated, truncated, info = env.step(action.cpu().numpy().flatten())
+            action = agent.get_action(torch.Tensor(obs).to(device), deterministic=True)
+            obs, reward, terminated, truncated, info = env.step(
+                action.cpu().numpy().flatten()
+            )
             total_rewards += reward
     env.close()
     return total_rewards / eval_episodes
 
+
 if __name__ == "__main__":
     os.environ["MUJOCO_GL"] = "osmesa"  # 使用 osmesa 渲染
     args = tyro.cli(Args)
-    args.batch_size = int(args.num_envs * args.num_steps)
+    args.batch_size = int(args.num_vec_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -126,7 +143,8 @@ if __name__ == "__main__":
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # TRY NOT TO MODIFY: seeding
@@ -136,30 +154,36 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [envs.make_env(args.env_id) for i in range(args.num_envs)]
+    vec_envs = gym.vector.SyncVectorEnv(
+        [envs.make_env(args.env_id, task=np.pi / 2) for i in range(args.num_vec_envs)]
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    assert isinstance(
+        vec_envs.single_action_space, gym.spaces.Box
+    ), "only continuous action space is supported"
 
-    state_dim = np.prod(envs.single_observation_space.shape)
-    action_dim = np.prod(envs.single_action_space.shape)
+    state_dim = np.prod(vec_envs.single_observation_space.shape)
+    action_dim = np.prod(vec_envs.single_action_space.shape)
     agent = PPOAgent(state_dim, action_dim).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
-    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    obs = torch.zeros(
+        (args.num_steps, args.num_vec_envs) + vec_envs.single_observation_space.shape
+    ).to(device)
+    actions = torch.zeros(
+        (args.num_steps, args.num_vec_envs) + vec_envs.single_action_space.shape
+    ).to(device)
+    logprobs = torch.zeros((args.num_steps, args.num_vec_envs)).to(device)
+    rewards = torch.zeros((args.num_steps, args.num_vec_envs)).to(device)
+    dones = torch.zeros((args.num_steps, args.num_vec_envs)).to(device)
+    values = torch.zeros((args.num_steps, args.num_vec_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs, _ = vec_envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
-    next_done = torch.zeros(args.num_envs).to(device)
+    next_done = torch.zeros(args.num_vec_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -169,7 +193,7 @@ if __name__ == "__main__":
             optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
-            global_step += args.num_envs
+            global_step += args.num_vec_envs
             obs[step] = next_obs
             dones[step] = next_done
 
@@ -181,17 +205,30 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            next_obs, reward, terminations, truncations, infos = vec_envs.step(
+                action.cpu().numpy()
+            )
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
+                next_done
+            ).to(device)
 
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                        print(
+                            f"global_step={global_step}, episodic_return={info['episode']['r']}"
+                        )
+                        writer.add_scalar(
+                            "charts/episodic_return", info["episode"]["r"], global_step
+                        )
+                        writer.add_scalar(
+                            "charts/episodic_length", info["episode"]["l"], global_step
+                        )
+        next_obs, _ = vec_envs.reset()
+        next_obs = torch.Tensor(next_obs).to(device)
+        next_done = torch.zeros(args.num_vec_envs).to(device)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -205,17 +242,18 @@ if __name__ == "__main__":
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                delta = (
+                    rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                )
+                advantages[t] = lastgaelam = (
+                    delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                )
             returns = advantages + values
 
-        writer.add_scalar('charts/actual_return', rewards.sum(0).mean().item(), global_step)
-        writer.add_scalar('charts/predict_return', returns[0].mean().item(), global_step)
-
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_obs = obs.reshape((-1,) + vec_envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_actions = actions.reshape((-1,) + vec_envs.single_action_space.shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
@@ -229,7 +267,9 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                    b_obs[mb_inds], b_actions[mb_inds]
+                )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -237,15 +277,21 @@ if __name__ == "__main__":
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                    clipfracs += [
+                        ((ratio - 1.0).abs() > args.clip_coef).float().mean().item()
+                    ]
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                        mb_advantages.std() + 1e-8
+                    )
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss2 = -mb_advantages * torch.clamp(
+                    ratio, 1 - args.clip_coef, 1 + args.clip_coef
+                )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
@@ -279,7 +325,9 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar(
+            "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
+        )
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -287,17 +335,38 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        writer.add_scalar(
+            "charts/actual_return", rewards.sum(0).mean().item(), global_step
+        )
+        writer.add_scalar(
+            "charts/predict_return", returns[0].mean().item(), global_step
+        )
 
+        print(
+            "SPS:",
+            int(global_step / (time.time() - start_time)),
+            "train return:",
+            rewards.sum(0).mean().item(),
+        )
+        writer.add_scalar(
+            "charts/SPS", int(global_step / (time.time() - start_time)), global_step
+        )
 
     if args.save_model:
-        print('Eval ...')
-        eval_return = evaluate(global_step, envs.make_env, args.env_id, agent, eval_episodes=3, episode_length=args.num_steps, video_dir=f'runs/{run_name}/videos')
-        print(f'Eval step: {global_step} Eval return: {eval_return}')
+        print("Eval ...")
+        eval_return = evaluate(
+            global_step,
+            envs.make_env,
+            args.env_id,
+            agent,
+            eval_episodes=3,
+            episode_length=args.num_steps,
+            video_dir=f"runs/{run_name}/videos",
+        )
+        print(f"Eval step: {global_step} Eval return: {eval_return}")
 
         model_path = f"runs/{run_name}/{args.exp_name}_{global_step}.cleanrl_model"
         print(f"model saved to {model_path}")
         torch.save(agent.state_dict(), model_path)
-    envs.close()
+    vec_envs.close()
     writer.close()

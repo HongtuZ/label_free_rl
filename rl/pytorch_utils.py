@@ -1,17 +1,26 @@
 import torch
 import torch.nn.functional as F
+import torch.utils
+import torch.utils.data
 from torch.distributions import Distribution, Normal
 from torch.distributions.utils import broadcast_all
 
-device = 'cpu'
+device = "cpu"
+
 
 def from_numpy(x):
     """Convert a numpy array to a PyTorch tensor."""
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return x.float().to(device)
     return torch.from_numpy(x).float().to(device) if x is not None else None
 
-def to_numpy(x):
+
+def get_numpy(x):
     """Convert a PyTorch tensor to a numpy array."""
     return x.detach().cpu().numpy() if x is not None else None
+
 
 def zeros(*sizes, **kwargs):
     return torch.zeros(*sizes, **kwargs).to(device)
@@ -34,8 +43,10 @@ def ones_like(*args, **kwargs):
 
 
 class TanhNormal(Distribution):
-    arg_constraints = {'loc': torch.distributions.constraints.real,
-                       'scale': torch.distributions.constraints.positive}
+    arg_constraints = {
+        "loc": torch.distributions.constraints.real,
+        "scale": torch.distributions.constraints.positive,
+    }
     has_rsample = True
 
     def __init__(self, loc, scale, eps=1e-6, validate_args=False):
@@ -56,8 +67,11 @@ class TanhNormal(Distribution):
         value = torch.clamp(value, -1 + self.eps, 1 - self.eps)
         atanh = 0.5 * (torch.log1p(value) - torch.log1p(-value))
         log_prob = self.normal.log_prob(atanh)
-        log_det_jacobian = 2 * (torch.log(torch.tensor(2.0, device=value.device)) 
-                                - atanh - F.softplus(-2 * atanh))
+        log_det_jacobian = 2 * (
+            torch.log(torch.tensor(2.0, device=value.device))
+            - atanh
+            - F.softplus(-2 * atanh)
+        )
         return log_prob - log_det_jacobian
 
     def entropy(self, n_samples=1):
@@ -65,8 +79,9 @@ class TanhNormal(Distribution):
         Estimate the entropy of TanhNormal using Monte Carlo sampling.
         """
         z = self.normal.rsample((n_samples,))  # shape: (n_samples, *batch_shape)
-        log_det = 2 * (torch.log(torch.tensor(2.0, device=z.device)) 
-                       - z - F.softplus(-2 * z))
+        log_det = 2 * (
+            torch.log(torch.tensor(2.0, device=z.device)) - z - F.softplus(-2 * z)
+        )
         # H[tanh(z)] = H[z] + E[log|det J|]
         entropy = self.normal.entropy() + log_det.mean(dim=0)
         return entropy
@@ -86,3 +101,25 @@ class TanhNormal(Distribution):
     @property
     def base_dist(self):
         return self.normal
+
+
+class ReplayBuffer(torch.utils.data.Dataset):
+    def __init__(self, max_size=1000000):
+        self.max_size = max_size
+        self.storage = []
+        self.ptr = 0
+        self.size = 0
+
+    def add(self, data):
+        if len(self.storage) < self.max_size:
+            self.storage.append(data)
+        else:
+            self.storage[self.ptr] = data
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        return self.storage[idx]

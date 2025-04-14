@@ -1,22 +1,27 @@
+from typing import Optional
+
 import gymnasium as gym
 import numpy as np
-from typing import Optional
 import pygame
+
 
 class PointEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, task, render_mode=None, **kwargs):
+    def __init__(self, task=0, render_mode=None, **kwargs):
         self.step_count = 0
         self.task = task
         self.goal = np.array((np.cos(task), np.sin(task)), dtype=np.float32)
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2,))
-        self.action_space = gym.spaces.Box(low=-0.1, high=0.1, shape=(2,))
+        self.observation_space = gym.spaces.Box(low=-np.inf,
+                                                high=np.inf,
+                                                shape=(2, ))
+        self.action_space = gym.spaces.Box(low=-0.1, high=0.1, shape=(2, ))
         self.state = np.array((0.0, 0.0), dtype=np.float32)
 
         # For rendering
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        assert render_mode is None or render_mode in self.metadata[
+            "render_modes"]
         self.render_mode = render_mode
         self.window_size = 512
         self.window = None
@@ -24,25 +29,26 @@ class PointEnv(gym.Env):
 
     def reset(
         self,
-        task: Optional[float] = None,
         *,
         seed: Optional[int] = None,
         options: Optional[dict] = None,
     ):
         super().reset(seed=seed)
         self.step_count = 0
+        task = options.get("task") if options is not None else None
         if task is not None:
             self.task = task
-            self.goal = np.array((np.cos(task), np.sin(task)), dtype=np.float32)
+            self.goal = np.array((np.cos(task), np.sin(task)),
+                                 dtype=np.float32)
         self.state = np.array((0.0, 0.0), dtype=np.float32)
-        info = {'task': self.task}
+        info = {"task": self.task}
         return self.state, info
 
     def step(self, action):
         self.state += action
         obs = self.state
-        reward = - np.linalg.norm(self.state - self.goal)
-        info = {'task': self.task}
+        reward = -np.linalg.norm(self.state - self.goal)
+        info = {"task": self.task}
         return obs, reward, False, False, info
 
     def render(self):
@@ -54,8 +60,7 @@ class PointEnv(gym.Env):
             pygame.init()
             pygame.display.init()
             self.window = pygame.display.set_mode(
-                (self.window_size, self.window_size)
-            )
+                (self.window_size, self.window_size))
         if self.clock is None and self.render_mode == "human":
             self.clock = pygame.time.Clock()
 
@@ -72,13 +77,7 @@ class PointEnv(gym.Env):
             return x_pix, y_pix
 
         # Darw the circle
-        pygame.draw.circle(
-            canvas,
-            (128, 128, 128),
-            xy2pix((0, 0)),
-            radius,
-            2
-        )
+        pygame.draw.circle(canvas, (128, 128, 128), xy2pix((0, 0)), radius, 2)
 
         pygame.draw.circle(
             canvas,
@@ -112,6 +111,5 @@ class PointEnv(gym.Env):
             # The following line will automatically add a delay to keep the framerate stable.
             self.clock.tick(self.metadata["render_fps"])
         else:  # rgb_array
-            return np.transpose(
-                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
-            )
+            return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)),
+                                axes=(1, 0, 2))
