@@ -2,15 +2,9 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.envs.registration import register
 
-register(
-    id="ant-dir",
-    entry_point="envs.ant_dir:AntDirEnv",
-)
+register(id="ant-dir", entry_point="envs.ant_dir:AntDirEnv")
 
-register(
-    id="point-robot",
-    entry_point="envs.point_robot:PointEnv",
-)
+register(id="point-robot", entry_point="envs.point_robot:PointEnv")
 
 
 def make_env(env_name, task, *args, **kwargs):

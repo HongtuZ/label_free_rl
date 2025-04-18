@@ -1,3 +1,4 @@
+import pickle
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +27,8 @@ class PPOArgs:
     save_interval: int = 10  # interval iterations to save the policy
     update_epochs: int = 10  # number of epochs to update the policy
     num_minibatches: int = 4  # number of minibatches to cal the loss
-    eval_nums: int = 3  # number of episodes to eval the policy
+    save_training_trajectory: bool = False  # whether to save training transitions
+    save_training_trajectory_interval: int = 2  # interval iterations to save
     # --------------------------------------------------------
     #                      PPO hyperparameters
     # --------------------------------------------------------
@@ -35,10 +37,15 @@ class PPOArgs:
     gamma: float = 0.99  # discount factor
     gae_lambda: float = 0.95  # lambda for GAE
     clip_coef: float = 0.2  # clip range for the PPO
-    ent_coef: float = 0.0  # 0.01  # entropy loss coefficient
+    ent_coef: float = 0.01  # 0.01  # entropy loss coefficient
     vf_coef: float = 0.5  # value loss coefficient
     clip_vloss: bool = True  # whether to clip the value loss
     max_grad_norm: float = 0.5  # max norm for the gradient
+    # --------------------------------------------------------
+    #                     Agent hyperparameters
+    # --------------------------------------------------------
+    actor_hidden_dims: list = None  # hidden dims for the actor
+    critic_hidden_dims: list = None  # hidden dims for the critic
     # --------------------------------------------------------
 
 
@@ -47,15 +54,17 @@ class PPOAgent(nn.Module):
     LOG_SIG_MIN = -20
     EPS = 1e-6
 
-    def __init__(self, state_dim, action_dim):
+    def __init__(self, state_dim, action_dim, actor_hidden_dims, critic_hidden_dims):
         super().__init__()
         self.register_buffer("state_dim", torch.tensor(state_dim))
         self.register_buffer("action_dim", torch.tensor(action_dim))
 
-        self.critic = MLP(input_dim=self.state_dim, hidden_dims=[64, 64], output_dim=1)
+        self.critic = MLP(
+            input_dim=self.state_dim, hidden_dims=critic_hidden_dims, output_dim=1
+        )
         self.actor_mean = MLP(
             input_dim=self.state_dim,
-            hidden_dims=[64, 64],
+            hidden_dims=actor_hidden_dims,
             output_dim=self.action_dim,
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, self.action_dim))
@@ -95,18 +104,19 @@ class PPOAgent(nn.Module):
         )
 
     @classmethod
-    def load_from(cls, path):
+    def load_from(cls, path, actor_hidden_dims, critic_hidden_dims):
         state_dict = torch.load(path, map_location=ptu.device)
         state_dim = state_dict["state_dim"].detach().cpu().item()
         action_dim = state_dict["action_dim"].detach().cpu().item()
-        agent = cls(state_dim, action_dim)
+        agent = cls(state_dim, action_dim, actor_hidden_dims, critic_hidden_dims)
         agent.load_state_dict(state_dict)
         return agent
 
 
 class PPORunner:
 
-    def __init__(self, vec_envs, eval_env, args):
+    def __init__(self, vec_envs, eval_envs, args, task_idx=0):
+        self.task_idx = task_idx
         self.log_dir = Path(args.log_dir)
         self.writer = SummaryWriter(str(self.log_dir))
         self.writer.add_text(
@@ -119,38 +129,42 @@ class PPORunner:
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
 
-        self.eval_env = eval_env
+        self.eval_envs = eval_envs
         self.vec_envs = vec_envs
         self.num_envs = vec_envs.num_envs
         self.state_dim = np.prod(self.vec_envs.single_observation_space.shape)
         self.action_dim = np.prod(self.vec_envs.single_action_space.shape)
         self.args = args
-        self.agent = PPOAgent(self.state_dim, self.action_dim).to(ptu.device)
+        self.agent = PPOAgent(
+            self.state_dim,
+            self.action_dim,
+            args.actor_hidden_dims,
+            args.critic_hidden_dims,
+        ).to(ptu.device)
         self.optimizer = optim.Adam(
             self.agent.parameters(), lr=args.learning_rate, eps=1e-5
         )
 
     def train(self):
         # ALGO Logic: Storage setup
-        observations = torch.zeros(
-            (self.args.num_steps, self.num_envs)
-            + self.vec_envs.single_observation_space.shape
-        ).to(ptu.device)
-        actions = torch.zeros(
-            (self.args.num_steps, self.num_envs)
-            + self.vec_envs.single_action_space.shape
-        ).to(ptu.device)
-        logprobs = torch.zeros((self.args.num_steps, self.num_envs, 1)).to(ptu.device)
-        rewards = torch.zeros((self.args.num_steps, self.num_envs, 1)).to(ptu.device)
-        dones = torch.zeros((self.args.num_steps, self.num_envs, 1)).to(ptu.device)
-        values = torch.zeros((self.args.num_steps, self.num_envs, 1)).to(ptu.device)
+        observations = ptu.zeros((self.args.num_steps, self.num_envs, self.state_dim))
+        actions = ptu.zeros((self.args.num_steps, self.num_envs, self.action_dim))
+        logprobs = ptu.zeros((self.args.num_steps, self.num_envs, 1))
+        rewards = ptu.zeros((self.args.num_steps, self.num_envs, 1))
+        dones = ptu.zeros((self.args.num_steps, self.num_envs, 1))
+        values = ptu.zeros((self.args.num_steps, self.num_envs, 1))
+        next_observations = ptu.zeros_like(observations)
+        infos = []
 
         # ALGO Logic: training setup
         global_step = 0
         obs, _ = self.vec_envs.reset(seed=self.args.seed)
-        done = np.zeros(self.num_envs)
         for iteration in tqdm(
-            range(self.args.num_iterations), desc="Training iter", unit="it"
+            range(self.args.num_iterations),
+            desc=f"Task {self.task_idx} Training iter",
+            unit="it",
+            position=self.task_idx,
+            leave=True,
         ):
             # Annealing the rate if instructed to do so.
             if self.args.anneal_lr:
@@ -158,40 +172,44 @@ class PPORunner:
                 lrnow = frac * self.args.learning_rate
                 self.optimizer.param_groups[0]["lr"] = lrnow
             # ALGO Logic: collect data
+            infos.clear()
             for step in range(self.args.num_steps):
                 global_step += self.num_envs
-                obs, done = ptu.from_numpy(obs), ptu.from_numpy(done.reshape(-1, 1))
-                observations[step], dones[step] = obs, done
+                obs = ptu.from_numpy(obs)
                 with torch.no_grad():
                     action, logprob, _, value = self.agent.get_action_and_value(obs)
-                obs, reward, terminated, truncated, info = self.vec_envs.step(
+                next_obs, reward, terminated, truncated, info = self.vec_envs.step(
                     ptu.get_numpy(action)
                 )
                 done = np.logical_or(terminated, truncated)
 
                 # store data
+                observations[step] = obs
                 actions[step] = action
                 logprobs[step] = logprob
-                rewards[step] = ptu.from_numpy(reward.reshape(-1, 1))
                 values[step] = value
+                next_observations[step] = ptu.from_numpy(next_obs)
+                rewards[step] = ptu.from_numpy(reward.reshape(-1, 1))
+                dones[step] = ptu.from_numpy(done.reshape(-1, 1))
+                infos.append(info)
+
+                obs = next_obs
 
             # ALGO Logic: update agent
             # Compute the target value and advantage
             with torch.no_grad():
                 # bootstrap value if not done
-                final_next_value = self.agent.get_value(ptu.from_numpy(obs))
-                final_done = ptu.from_numpy(done.reshape(-1, 1))
-                # cal the advantage
+                final_next_value = self.agent.get_value(ptu.from_numpy(next_obs))
                 advantages = ptu.zeros_like(rewards)
                 gae = ptu.zeros(self.num_envs, 1)
                 for t in reversed(range(self.args.num_steps)):
-                    if t == self.args.num_steps - 1:
-                        # bootstrap value if not done
-                        next_value = final_next_value
-                        notdone = 1.0 - final_done
-                    else:
-                        next_value = values[t + 1]
-                        notdone = 1.0 - dones[t + 1]
+                    next_value = (
+                        final_next_value
+                        if t == self.args.num_steps - 1
+                        else values[t + 1]
+                    )
+                    notdone = 1.0 - dones[t]
+                    # PPO Advantage
                     delta = (
                         rewards[t] + self.args.gamma * next_value * notdone - values[t]
                     )
@@ -269,29 +287,56 @@ class PPORunner:
                 "Loss/entropy_loss", entropy_loss.item(), global_step
             )
             self.writer.add_scalar("Loss/total_loss", loss.item(), global_step)
+            self.writer.add_scalar(
+                "Return/training_return", rewards.sum(0).mean(), global_step
+            )
             # ALGO Logic: eval
-            if iteration % self.args.eval_interval == 0:
+            if (
+                iteration % self.args.eval_interval == 0
+                or iteration == self.args.num_iterations - 1
+            ):
                 self.eval(global_step)
-            if iteration % self.args.save_interval == 0:
+            if (
+                iteration % self.args.save_interval == 0
+                or iteration == self.args.num_iterations - 1
+            ):
                 save_path = self.log_dir / f"checkpoints/agent_{iteration}.pth"
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(self.agent.state_dict(), str(save_path))
-
+            if (
+                self.args.save_training_trajectory
+                and iteration % self.args.save_training_trajectory_interval == 0
+                or iteration == self.args.num_iterations - 1
+            ):
+                for i in range(self.num_envs):
+                    save_path = (
+                        self.log_dir
+                        / f"training_trajectory/itr_{iteration}_traj_{i}.pkl"
+                    )
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    save_dict = {
+                        "observations": ptu.get_numpy(observations[:, i]),
+                        "actions": ptu.get_numpy(actions[:, i]),
+                        "rewards": ptu.get_numpy(rewards[:, i]),
+                        "next_observations": ptu.get_numpy(next_observations[:, i]),
+                        "dones": ptu.get_numpy(dones[:, i]),
+                        "infos": [{k: v[i]} for info in infos for k, v in info.items()],
+                    }
+                    # save with pickle
+                    with open(save_path, "wb") as f:
+                        pickle.dump(save_dict, f)
             # Rest the environment
             obs, _ = self.vec_envs.reset()
         self.vec_envs.close()
 
     def eval(self, training_step):
-        obs, _ = self.eval_env.reset()
-        eval_nums, total_rewards = self.args.eval_nums, 0
-        for _ in range(eval_nums):
-            for step in range(self.args.num_steps):
-                action = self.agent.get_action(ptu.from_numpy(obs), deterministic=False)
-                obs, reward, terminated, truncated, info = self.eval_env.step(
-                    ptu.get_numpy(action).flatten()
-                )
-                total_rewards += reward
-        self.writer.add_scalar("Eval/return", total_rewards / eval_nums, training_step)
-        tqdm.write(
-            f"Training step: {training_step} Eval return: {total_rewards / eval_nums:.6f}"
-        )
+        obs, _ = self.eval_envs.reset()
+        eval_return = 0
+        for step in range(self.args.num_steps):
+            action = self.agent.get_action(ptu.from_numpy(obs), deterministic=True)
+            obs, reward, terminated, truncated, info = self.eval_envs.step(
+                ptu.get_numpy(action)
+            )
+            eval_return += np.mean(reward)
+        self.writer.add_scalar("Return/eval_return", eval_return, training_step)
+        tqdm.write(f"Task {self.task_idx} Eval return: {eval_return}")

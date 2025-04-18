@@ -1,0 +1,76 @@
+EnvArgs:
+  # --------------------------------------------------------
+  #                      Environment setting
+  # --------------------------------------------------------
+  env_id: ant-dir  # name of the environment
+  tasks: np.linspace(0, np.pi, 10) # direction radian: 0~2pi
+  num_train_envs: 2  # number of parallel training environments
+  num_eval_envs: 2  # number of parallel evaluation environments
+
+CERTAINArgs:
+  # --------------------------------------------------------
+  #                      Training setting
+  # --------------------------------------------------------
+  log_dir: logs/certain/ant-dir
+  dataset_dir: dataset/ant-dir
+  seed: 1
+  batch_size: 256  # batch size for training
+  num_iterations: 100  # total training iterations
+  eval_num_steps: 256  # number of eval env rollout steps
+  eval_interval: 1  # interval iterations to eval the policy
+  save_interval: 10  # interval iterations to save the policy
+  # --------------------------------------------------------
+  #                      Context agent
+  # --------------------------------------------------------
+  use_next_observation: true  # use next observation in context
+  latent_dim: 20
+  encoder_hidden_dims: [128, 128]  # hidden dims for the encoder
+  encoder_learning_rate: 0.001
+  context_agent_type: focal  # context agent type: focal, classifier, reconstruction, certain
+  # --------------------------------------------------------
+  #                      TD3+BC agent
+  # --------------------------------------------------------
+  actor_hidden_dims: [128, 128]  # hidden dims for the actor
+  critic_hidden_dims: [64, 64]  # hidden dims for the critic
+  actor_learning_rate: 0.001
+  critic_learning_rate: 0.001
+  discount: 0.99
+  tau: 0.005
+  policy_noise: 0.2
+  noise_clip: 0.5
+  policy_freq: 2
+  alpha: 2.5
+  # --------------------------------------------------------
+
+PPOArgs:
+  # --------------------------------------------------------
+  #                      Training setting
+  # --------------------------------------------------------
+  log_dir: logs/ant-dir
+  seed: 0
+  num_steps: 256  # number of env rollout steps per iteration
+  num_iterations: 5000  # total training iterations
+  eval_interval: 50 # interval iterations to eval the policy
+  save_interval: 500  # interval iterations to save the policy
+  update_epochs: 10  # number of epochs to update the policy
+  num_minibatches: 4  # number of minibatches to calculate the loss
+  save_training_trajectory: true  # whether to save training transitions
+  save_training_trajectory_interval: 100  # interval iterations to save
+  # --------------------------------------------------------
+  #                      PPO hyperparameters
+  # --------------------------------------------------------
+  learning_rate: 0.0003  # learning rate
+  anneal_lr: true  # whether to anneal the learning rate
+  gamma: 0.99  # discount factor
+  gae_lambda: 0.95  # lambda for GAE
+  clip_coef: 0.2  # clip range for the PPO
+  ent_coef: 0.1  # entropy loss coefficient
+  vf_coef: 0.5  # value loss coefficient
+  clip_vloss: true  # whether to clip the value loss
+  max_grad_norm: 0.5  # max norm for the gradient
+  # --------------------------------------------------------
+  #                     Agent hyperparameters
+  # --------------------------------------------------------
+  actor_hidden_dims: [128, 128]  # hidden dims for the actor
+  critic_hidden_dims: [64, 64]  # hidden dims for the critic
+  # --------------------------------------------------------

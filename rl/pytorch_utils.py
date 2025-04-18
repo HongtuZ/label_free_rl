@@ -1,3 +1,7 @@
+import pickle
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils
@@ -40,6 +44,11 @@ def zeros_like(*args, **kwargs):
 
 def ones_like(*args, **kwargs):
     return torch.ones_like(*args, **kwargs).to(device)
+
+
+def soft_update(target: torch.nn.Module, source: torch.nn.Module, tau: float):
+    for target_param, source_param in zip(target.parameters(), source.parameters()):
+        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
 
 
 class TanhNormal(Distribution):
@@ -103,23 +112,98 @@ class TanhNormal(Distribution):
         return self.normal
 
 
-class ReplayBuffer(torch.utils.data.Dataset):
-    def __init__(self, max_size=1000000):
-        self.max_size = max_size
-        self.storage = []
-        self.ptr = 0
-        self.size = 0
-
-    def add(self, data):
-        if len(self.storage) < self.max_size:
-            self.storage.append(data)
-        else:
-            self.storage[self.ptr] = data
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size = min(self.size + 1, self.max_size)
+class OfflineMetaDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        self.data = self.load_data(data_dir)
+        self.max_size = max(
+            [len(task_data["observations"]) for task_data in self.data.values()]
+        )
 
     def __len__(self):
-        return self.size
+        return self.max_size
 
     def __getitem__(self, idx):
-        return self.storage[idx]
+        observations = []
+        actions = []
+        rewards = []
+        next_observations = []
+        dones = []
+        infos = []
+        for task, task_data in self.data.items():
+            actual_idx = idx % len(task_data["observations"])
+            observations.append(task_data["observations"][actual_idx])
+            actions.append(task_data["actions"][actual_idx])
+            rewards.append(task_data["rewards"][actual_idx])
+            next_observations.append(task_data["next_observations"][actual_idx])
+            dones.append(task_data["dones"][actual_idx])
+            infos.append(task_data["infos"][actual_idx])
+        return {
+            "observations": np.array(observations),
+            "actions": np.array(actions),
+            "rewards": np.array(rewards),
+            "next_observations": np.array(next_observations),
+            "dones": np.array(dones),
+            "infos": infos,
+        }
+
+    def sample(self, task, batch_size):
+        task_data = self.data[str(task)]
+        indices = np.random.choice(len(task_data["observations"]), batch_size)
+        observations = task_data["observations"][indices]
+        actions = task_data["actions"][indices]
+        rewards = task_data["rewards"][indices]
+        next_observations = task_data["next_observations"][indices]
+        dones = task_data["dones"][indices]
+        infos = [task_data["infos"][i] for i in indices]
+        return {
+            "observations": torch.tensor(observations),
+            "actions": torch.tensor(actions),
+            "rewards": torch.tensor(rewards),
+            "next_observations": torch.tensor(next_observations),
+            "dones": torch.tensor(dones),
+            "infos": infos,
+        }
+
+    @staticmethod
+    def collate_fn(batch):
+        # Convert batch of data to tensors: tasks x batch_size x data_dim
+        batch_data = {
+            key: (
+                torch.tensor(np.stack([b[key] for b in batch])).permute(1, 0, 2)
+                if key != "infos"
+                else list(zip(*[b[key] for b in batch]))
+            )
+            for key in batch[0]
+        }
+        return batch_data
+
+    def load_data(self, data_dir):
+        data_dir = Path(data_dir)
+        data = {}
+        if not data_dir.exists():
+            raise ValueError(f"Data directory {str(data_dir)} does not exist.")
+        for traj_path in data_dir.rglob("*.pkl"):
+            task = traj_path.parent.parent.name.split("_")[-1]
+            if task not in data:
+                data[task] = {
+                    "observations": [],
+                    "actions": [],
+                    "rewards": [],
+                    "next_observations": [],
+                    "dones": [],
+                    "infos": [],
+                }
+            with open(str(traj_path), "rb") as f:
+                traj_data = pickle.load(f)
+            data[task]["observations"].extend(traj_data["observations"])
+            data[task]["actions"].extend(traj_data["actions"])
+            data[task]["rewards"].extend(traj_data["rewards"])
+            data[task]["next_observations"].extend(traj_data["next_observations"])
+            data[task]["dones"].extend(traj_data["dones"])
+            data[task]["infos"].extend(traj_data["infos"])
+        for task, task_data in data.items():
+            for key, value in task_data.items():
+                if key != "infos":
+                    task_data[key] = np.array(value)
+        return data

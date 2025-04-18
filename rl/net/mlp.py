@@ -12,11 +12,9 @@ def init_weights(m):
 
 class MLP(nn.Module):
 
-    def __init__(self,
-                 hidden_dims,
-                 input_dim,
-                 output_dim,
-                 output_activation=nn.Identity):
+    def __init__(
+        self, hidden_dims, input_dim, output_dim, output_activation=nn.Identity
+    ):
         super(MLP, self).__init__()
         self.hidden_dims = hidden_dims
         self.input_dim = input_dim
@@ -27,7 +25,7 @@ class MLP(nn.Module):
         prev_dim = input_dim
         for dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, dim))
-            layers.append(nn.ReLU())
+            layers.append(nn.LeakyReLU())
             prev_dim = dim
         layers.append(nn.Linear(prev_dim, output_dim))
         layers.append(output_activation())

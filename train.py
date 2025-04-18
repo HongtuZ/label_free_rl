@@ -7,7 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from helper import plot_tsne
+from rl.helper import plot_tsne
 
 device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
@@ -65,8 +65,7 @@ def train(dataset_dir):
         data, labels = zip(*batch)
         max_len = max([len(trj) for trj in data])
         data = [
-            np.pad(trj, ((0, max_len - len(trj)), (0, 0)), mode="edge")
-            for trj in data
+            np.pad(trj, ((0, max_len - len(trj)), (0, 0)), mode="edge") for trj in data
         ]
         data = torch.tensor(np.stack(data), dtype=torch.float32).to(device)
         labels = torch.tensor(labels, dtype=torch.long)
@@ -84,22 +83,21 @@ def train(dataset_dir):
     output_dim = state_dim + 1
 
     Encoder = MLP(input_dim, latent_dim, [128, 128, 128])
-    Decoder = MLP(state_dim + action_dim + latent_dim, output_dim,
-                  [128, 128, 128])
+    Decoder = MLP(state_dim + action_dim + latent_dim, output_dim, [128, 128, 128])
     Encoder.to(device)
     Decoder.to(device)
 
     # Train the model
-    optimizer = torch.optim.Adam(list(Encoder.parameters()) +
-                                 list(Decoder.parameters()),
-                                 lr=1e-3)
+    optimizer = torch.optim.Adam(
+        list(Encoder.parameters()) + list(Decoder.parameters()), lr=1e-3
+    )
     criterion = nn.MSELoss()
     num_epochs = 100
     for epoch in tqdm(range(num_epochs), desc="Training"):
         all_zs = []
         for data, labels in tqdm(dataset, desc="Epoch", leave=False):
-            sa = data[..., :state_dim + action_dim]
-            r_ns = data[..., state_dim + action_dim:]
+            sa = data[..., : state_dim + action_dim]
+            r_ns = data[..., state_dim + action_dim :]
 
             b, t, d = data.shape
 

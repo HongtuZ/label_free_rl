@@ -7,8 +7,7 @@ class AntDirEnv(AntEnv):
     def __init__(self, task, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.task = task
-        self.direction = np.array((np.cos(task), np.sin(task)),
-                                  dtype=np.float32)
+        self.direction = np.array((np.cos(task), np.sin(task)), dtype=np.float32)
 
     def step(self, action):
         xy_position_before = self.data.body(self._main_body).xpos[:2].copy()
@@ -20,7 +19,6 @@ class AntDirEnv(AntEnv):
 
         observation = self._get_obs()
         reward, reward_info = self._get_rew(x_velocity, y_velocity, action)
-        terminated = (not self.is_healthy) and self._terminate_when_unhealthy
         info = {
             "x_position": self.data.qpos[0],
             "y_position": self.data.qpos[1],
@@ -34,12 +32,13 @@ class AntDirEnv(AntEnv):
         if self.render_mode == "human":
             self.render()
         # truncation=False as the time limit is handled by the `TimeLimit` wrapper added during `make`
-        return observation, reward, terminated, False, info
+        return observation, reward, False, False, info
 
     def _get_rew(self, x_velocity: float, y_velocity: float, action):
         forward_reward = (
-            np.dot(self.direction, np.array(
-                (x_velocity, y_velocity))) * self._forward_reward_weight)
+            np.dot(self.direction, np.array((x_velocity, y_velocity)))
+            * self._forward_reward_weight
+        )
         healthy_reward = self.healthy_reward
         rewards = forward_reward + healthy_reward
 
@@ -58,11 +57,11 @@ class AntDirEnv(AntEnv):
 
         return reward, reward_info
 
-    def reset(self, task=None, *, seed=None, options=None):
+    def reset(self, *, seed=None, options=None):
+        task = options.get("task", None) if options else None
         obs, info = super().reset(seed=seed, options=options)
         if task is not None:
             self.task = task
-            self.direction = np.array((np.cos(task), np.sin(task)),
-                                      dtype=np.float32)
+            self.direction = np.array((np.cos(task), np.sin(task)), dtype=np.float32)
         info["task"] = self.task
         return obs, info

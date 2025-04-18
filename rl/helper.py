@@ -1,4 +1,5 @@
 import random
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,11 +22,9 @@ def plot_tsne(data, save_path=None):
 
     # 可视化
     plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(X_embedded[:, 0],
-                          X_embedded[:, 1],
-                          c=y,
-                          cmap="tab20",
-                          alpha=0.5)
+    scatter = plt.scatter(
+        X_embedded[:, 0], X_embedded[:, 1], c=y, cmap="tab20", alpha=0.5
+    )
     plt.colorbar(scatter, label="Label")
     plt.title("t-SNE Visualization")
     plt.xlabel("Dimension 1")
