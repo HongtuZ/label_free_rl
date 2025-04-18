@@ -57,10 +57,10 @@ def train(config_path):
 
     # Set up CERTAIN args
     certain_args = CERTAINArgs(**config["CERTAINArgs"])
-    certain_args.log_dir = str(
-        Path(certain_args.log_dir)
-        / f'{certain_args.context_agent_type}_{time.strftime("%Y%m%d_%H%M%S", time.localtime())}'
-    )
+    exp_name = certain_args.context_agent_type
+    exp_name += f"-certain" if certain_args.enable_certain else ""
+    exp_name += f'_{time.strftime("%Y%m%d_%H%M%S", time.localtime())}'
+    certain_args.log_dir = str(Path(certain_args.log_dir) / exp_name)
     CERTAINRunner(eval_envs, certain_args).train()
 
 

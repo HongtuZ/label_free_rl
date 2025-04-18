@@ -35,6 +35,9 @@ CERTAINArgs:
   decoder_hidden_dims: [128, 128]  # hidden dims for the decoder
   unicorn_alpha: 1.0 # unicorn alpha
   # ----------------------CERTAIN---------------------------
+  enable_certain: true  # whether to use CERTAIN
+  loss_predictor_hidden_dims: [128, 128]  # hidden dims for the loss predictor
+  recon_decoder_hidden_dims: [128, 128]  # hidden dims for the decoder
   # --------------------------------------------------------
   #                      TD3+BC agent
   # --------------------------------------------------------

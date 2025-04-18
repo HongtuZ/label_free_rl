@@ -178,6 +178,80 @@ class UnicornAgent(FocalAgent):
         return latent_zs
 
 
+class CertainAgent(nn.Module):
+    def __init__(
+        self,
+        state_dim,
+        action_dim,
+        context_dim,
+        latent_dim,
+        loss_predictor_hidden_dims,
+        recon_decoder_hidden_dims,
+    ):
+        super().__init__()
+        self.register_buffer("state_dim", torch.tensor(state_dim))
+        self.register_buffer("action_dim", torch.tensor(action_dim))
+        self.register_buffer("context_dim", torch.tensor(context_dim))
+        self.register_buffer("latent_dim", torch.tensor(latent_dim))
+        self.register_buffer(
+            "loss_predictor_hidden_dims", torch.tensor(loss_predictor_hidden_dims)
+        )
+        self.register_buffer(
+            "recon_decoder_hidden_dims", torch.tensor(recon_decoder_hidden_dims)
+        )
+        self.loss_predictor = MLP(
+            input_dim=context_dim + latent_dim,
+            hidden_dims=loss_predictor_hidden_dims,
+            output_dim=latent_dim,
+        )
+        self.recon_decoder = MLP(
+            input_dim=state_dim + action_dim + latent_dim,
+            hidden_dims=recon_decoder_hidden_dims,
+            output_dim=context_dim - state_dim - action_dim,
+        )
+
+    def compute_loss(self, context, latent_zs, target_loss):
+        predictor_input = torch.cat([context, latent_zs], dim=-1)
+        pred_loss = torch.mean(self.loss_predictor(predictor_input))
+        loss_loss = torch.mean((pred_loss - target_loss) ** 2)
+        recon_input = torch.cat(
+            [
+                context[..., : self.state_dim + self.action_dim],
+                latent_zs,
+            ],
+            dim=-1,
+        )
+        pred_rns = self.recon_decoder(recon_input)
+        recon_loss = torch.mean(
+            (pred_rns - context[..., self.state_dim + self.action_dim :]) ** 2
+        )
+        return loss_loss + recon_loss
+
+    @torch.no_grad()
+    def get_restraint_latent(self, context, latent_zs):
+        # shape batch * dim
+        pred_loss = torch.mean(
+            self.loss_predictor(torch.cat([context, latent_zs], dim=-1)), dim=-1
+        )
+        pred_rns = self.recon_decoder(
+            torch.cat(
+                [
+                    context[..., : self.state_dim + self.action_dim],
+                    latent_zs,
+                ],
+                dim=-1,
+            )
+        )
+        recon_loss = torch.mean(
+            (pred_rns - context[..., self.state_dim + self.action_dim :]) ** 2, dim=-1
+        )
+        recon_mask = recon_loss > recon_loss.mean()
+        pred_loss[recon_mask] = 1e9
+        weights = torch.softmax(-pred_loss, dim=0).reshape(-1, 1)
+        restraint_latent_z = torch.sum(latent_zs * weights, dim=0).reshape(1, -1)
+        return restraint_latent_z
+
+
 class TD3BCAgent(nn.Module):
     def __init__(
         self,

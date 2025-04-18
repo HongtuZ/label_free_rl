@@ -13,7 +13,13 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import rl.pytorch_utils as ptu
-from rl.net.agent import ClassifierAgent, FocalAgent, TD3BCAgent, UnicornAgent
+from rl.net.agent import (
+    CertainAgent,
+    ClassifierAgent,
+    FocalAgent,
+    TD3BCAgent,
+    UnicornAgent,
+)
 from rl.net.mlp import MLP
 
 
@@ -46,6 +52,9 @@ class CERTAINArgs:
     decoder_hidden_dims: list = None
     unicorn_alpha: float = 1.0
     # ----------------------CERTAIN---------------------------
+    enable_certain: bool = True
+    loss_predictor_hidden_dims: list = None
+    recon_decoder_hidden_dims: list = None
     # --------------------------------------------------------
     #                      TD3+BC agent
     # --------------------------------------------------------
@@ -86,6 +95,19 @@ class CERTAINRunner:
             if args.use_next_observation
             else self.state_dim + self.action_dim + 1
         )
+        # Certain agent to learn the latent restraint stratage
+        if args.enable_certain:
+            self.certain_agent = CertainAgent(
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                context_dim=self.context_dim,
+                latent_dim=args.latent_dim,
+                loss_predictor_hidden_dims=args.loss_predictor_hidden_dims,
+                recon_decoder_hidden_dims=args.recon_decoder_hidden_dims,
+            ).to(ptu.device)
+            self.certain_optimizer = optim.Adam(
+                self.certain_agent.parameters(), lr=args.encoder_learning_rate, eps=1e-5
+            )
         # Context agent to infer the latent variable
         if args.context_agent_type == "focal":
             self.context_agent = FocalAgent(
@@ -183,6 +205,15 @@ class CERTAINRunner:
                 context_loss.backward()
                 self.context_optimizer.step()
 
+                if self.args.enable_certain:
+                    # Update certain agent
+                    certain_loss = self.certain_agent.compute_loss(
+                        context, latent_zs.detach(), context_loss.detach()
+                    )
+                    self.certain_optimizer.zero_grad()
+                    certain_loss.backward()
+                    self.certain_optimizer.step()
+
                 # Update TD3+BC
                 latent_z = (
                     torch.mean(latent_zs, dim=1, keepdim=True)
@@ -212,6 +243,10 @@ class CERTAINRunner:
                     self.writer.add_scalar(
                         "Loss/actor_loss", actor_loss.item(), global_step
                     )
+                if self.args.enable_certain:
+                    self.writer.add_scalar(
+                        "Loss/certain_loss", context_loss.item(), global_step
+                    )
             # ALGO Logic: eval
             if (
                 iteration % self.args.eval_interval == 0
@@ -233,6 +268,11 @@ class CERTAINRunner:
                 policy_agent_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(self.context_agent.state_dict(), str(context_agent_path))
                 torch.save(self.policy_agent.state_dict(), str(policy_agent_path))
+                if self.args.enable_certain:
+                    certain_agent_path = (
+                        self.log_dir / f"checkpoints/certain_agent_{global_step}.pth"
+                    )
+                    torch.save(self.certain_agent.state_dict(), str(certain_agent_path))
 
     def online_collect_traj(self, task, latent_z, episode_steps):
         observations = []
@@ -257,9 +297,13 @@ class CERTAINRunner:
             np.array(next_observations).transpose(1, 0, 2),
         )
 
-    def eval_task_with_context(self, task, context):
+    def eval_task_with_context(self, task, context, context_type="online"):
         context = context[..., : self.context_dim].reshape(-1, self.context_dim)
-        latent_z = self.context_agent.infer_latent(context).mean(dim=0, keepdim=True)
+        latent_zs = self.context_agent.infer_latent(context)
+        if self.args.enable_certain and context_type == "online":
+            latent_z = self.certain_agent.get_restraint_latent(context, latent_zs)
+        else:
+            latent_z = latent_zs.mean(dim=0, keepdim=True)
         first_traj = self.online_collect_traj(task, latent_z, self.args.eval_num_steps)
         observations, actions, rewards, next_observations = first_traj
         return np.mean(np.sum(rewards, axis=1))
@@ -276,7 +320,9 @@ class CERTAINRunner:
             ],
             dim=-1,
         ).to(ptu.device)
-        offline_return = self.eval_task_with_context(task, offline_context)
+        offline_return = self.eval_task_with_context(
+            task, offline_context, context_type="offline"
+        )
 
         # eval zero-shot
         prior_latent_z = ptu.zeros(1, self.args.latent_dim)
