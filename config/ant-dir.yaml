@@ -27,6 +27,14 @@ CERTAINArgs:
   encoder_hidden_dims: [128, 128]  # hidden dims for the encoder
   encoder_learning_rate: 0.001
   context_agent_type: focal  # context agent type: focal, classifier, reconstruction, certain
+  # ----------------------FOCAL-----------------------------
+  # ----------------------Classifier------------------------
+  num_classes: 10
+  classifier_hidden_dims: [128]  # hidden dims for the classifier
+  # ----------------------Unicorn---------------------------
+  decoder_hidden_dims: [128, 128]  # hidden dims for the decoder
+  unicorn_alpha: 1.0 # unicorn alpha
+  # ----------------------CERTAIN---------------------------
   # --------------------------------------------------------
   #                      TD3+BC agent
   # --------------------------------------------------------

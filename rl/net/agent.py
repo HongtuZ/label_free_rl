@@ -11,10 +11,11 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import rl.pytorch_utils as ptu
-from rl.net.mlp import MLP
+from rl.net.mlp import MLP, GaussianMLP
 
 
-class FOCALAgent(nn.Module):
+# The base context agent class
+class BaseContextAgent(nn.Module):
     def __init__(
         self,
         context_dim,
@@ -25,6 +26,23 @@ class FOCALAgent(nn.Module):
         self.register_buffer("context_dim", torch.tensor(context_dim))
         self.register_buffer("latent_dim", torch.tensor(latent_dim))
         self.register_buffer("encoder_hidden_dims", torch.tensor(encoder_hidden_dims))
+
+    def compute_loss(self, context):
+        raise NotImplementedError("compute_loss not implemented")
+
+    @torch.no_grad()
+    def infer_latent(self, context):
+        raise NotImplementedError("infer_latent not implemented")
+
+
+class FocalAgent(BaseContextAgent):
+    def __init__(
+        self,
+        context_dim,
+        latent_dim,
+        encoder_hidden_dims,
+    ):
+        super().__init__(context_dim, latent_dim, encoder_hidden_dims)
         self.encoder = MLP(
             input_dim=context_dim,
             hidden_dims=encoder_hidden_dims,
@@ -35,13 +53,19 @@ class FOCALAgent(nn.Module):
     def compute_loss(self, context):
         # Compute the encoder loss
         latent_zs = self.encoder(context)  # shape (task, batch, dim)
-        latent_z = torch.mean(latent_zs, dim=1)  # shape (task, dim)
+        latent_z = torch.mean(latent_zs, dim=1, keepdim=True)  # shape (taskm, 1, dim)
         tasks = list(range(latent_z.shape[0]))
         return self.metric_loss(latent_z, tasks), latent_zs
 
+    @torch.no_grad()
+    def infer_latent(self, context):
+        # Compute the encoder loss
+        latent_zs = self.encoder(context)
+        return latent_zs
+
     # FOCAL-latest: https://github.com/LanqingLi1993/FOCAL-latest/blob/main/train_offline_FOCAL.py#L244
     def metric_loss(self, z, tasks, epsilon=1e-3):
-        # z shape is (task, dim)
+        # z shape is (task, 1, dim)
         pos_z_loss = 0.0
         neg_z_loss = 0.0
         pos_cnt = 0
@@ -57,6 +81,95 @@ class FOCALAgent(nn.Module):
                     neg_cnt += 1
         # print(pos_z_loss, pos_cnt, neg_z_loss, neg_cnt)
         return pos_z_loss / (pos_cnt + epsilon) + neg_z_loss / (neg_cnt + epsilon)
+
+
+class ClassifierAgent(BaseContextAgent):
+    def __init__(
+        self,
+        context_dim,
+        latent_dim,
+        encoder_hidden_dims,
+        num_classes,
+        classifier_hidden_dims,
+    ):
+        super().__init__(context_dim, latent_dim, encoder_hidden_dims)
+        self.register_buffer("num_classes", torch.tensor(num_classes))
+        self.register_buffer(
+            "classifier_hidden_dims", torch.tensor(classifier_hidden_dims)
+        )
+        self.encoder = MLP(
+            input_dim=context_dim,
+            hidden_dims=encoder_hidden_dims,
+            output_dim=latent_dim,
+            output_activation=nn.Tanh,
+        )
+        self.classifier = MLP(
+            input_dim=latent_dim,
+            hidden_dims=classifier_hidden_dims,
+            output_dim=num_classes,
+        )
+        self.cross_entropy = nn.CrossEntropyLoss()
+
+    def compute_loss(self, context):
+        # Compute the encoder loss
+        m, b, _ = context.shape  # (task m, batch, dim)
+        latent_zs = self.encoder(context)
+        labels = (
+            torch.arange(m).reshape(m, 1).expand(m, b).reshape(-1).to(context.device)
+        )  # (task m * batch)
+        pred = self.classifier(
+            latent_zs.reshape(-1, self.latent_dim)
+        )  # (task m * batch, num_classes)
+        return self.cross_entropy(pred, labels), latent_zs
+
+    @torch.no_grad()
+    def infer_latent(self, context):
+        # Compute the encoder loss
+        latent_zs = self.encoder(context)
+        return latent_zs
+
+
+class UnicornAgent(FocalAgent):
+    def __init__(
+        self,
+        context_dim,
+        latent_dim,
+        encoder_hidden_dims,
+        state_dim,
+        action_dim,
+        decoder_hidden_dims,
+        unicorn_alpha,
+    ):
+        super().__init__(context_dim, latent_dim, encoder_hidden_dims)
+        self.register_buffer("state_dim", torch.tensor(state_dim))
+        self.register_buffer("action_dim", torch.tensor(action_dim))
+        self.register_buffer("decoder_hidden_dims", torch.tensor(decoder_hidden_dims))
+        self.unicorn_alpha = unicorn_alpha
+        self.decoder = GaussianMLP(
+            input_dim=state_dim + action_dim + latent_dim,
+            hidden_dims=decoder_hidden_dims,
+            output_dim=context_dim - state_dim - action_dim,
+        )
+
+    def compute_loss(self, context):
+        latent_zs = self.encoder(context)  # shape (task, batch, dim)
+        latent_z = torch.mean(latent_zs, dim=1, keepdim=True)  # shape (task, 1, dim)
+        tasks = list(range(latent_z.shape[0]))
+        decoder_input = torch.cat(
+            [
+                context[..., : self.state_dim + self.action_dim],
+                latent_z.expand_as(latent_zs),
+            ],
+            dim=-1,
+        )
+        # L = L_recon + alpha*L_focal
+        return (
+            self.decoder.nll_loss(
+                decoder_input, context[..., self.state_dim + self.action_dim :]
+            )
+            + self.unicorn_alpha * self.metric_loss(latent_z, tasks),
+            latent_zs,
+        )
 
     @torch.no_grad()
     def infer_latent(self, context):

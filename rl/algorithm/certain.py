@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import rl.pytorch_utils as ptu
-from rl.net.agent import FOCALAgent, TD3BCAgent
+from rl.net.agent import ClassifierAgent, FocalAgent, TD3BCAgent, UnicornAgent
 from rl.net.mlp import MLP
 
 
@@ -40,7 +40,11 @@ class CERTAINArgs:
     context_agent_type: str = "focal"  # context agent type
     # ----------------------FOCAL-----------------------------
     # ----------------------Classifier------------------------
-    # ----------------------Reconstruction--------------------
+    num_classes: int = 10
+    classifier_hidden_dims: list = None
+    # ----------------------Unicorn---------------------------
+    decoder_hidden_dims: list = None
+    unicorn_alpha: float = 1.0
     # ----------------------CERTAIN---------------------------
     # --------------------------------------------------------
     #                      TD3+BC agent
@@ -84,10 +88,28 @@ class CERTAINRunner:
         )
         # Context agent to infer the latent variable
         if args.context_agent_type == "focal":
-            self.context_agent = FOCALAgent(
+            self.context_agent = FocalAgent(
                 context_dim=self.context_dim,
                 latent_dim=args.latent_dim,
                 encoder_hidden_dims=args.encoder_hidden_dims,
+            ).to(ptu.device)
+        elif args.context_agent_type == "classifier":
+            self.context_agent = ClassifierAgent(
+                context_dim=self.context_dim,
+                latent_dim=args.latent_dim,
+                encoder_hidden_dims=args.encoder_hidden_dims,
+                num_classes=args.num_classes,
+                classifier_hidden_dims=args.classifier_hidden_dims,
+            ).to(ptu.device)
+        elif args.context_agent_type == "unicorn":
+            self.context_agent = UnicornAgent(
+                context_dim=self.context_dim,
+                latent_dim=args.latent_dim,
+                encoder_hidden_dims=args.encoder_hidden_dims,
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                decoder_hidden_dims=args.decoder_hidden_dims,
+                unicorn_alpha=args.unicorn_alpha,
             ).to(ptu.device)
         else:
             raise NotImplementedError(
