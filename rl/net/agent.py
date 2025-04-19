@@ -82,6 +82,17 @@ class FocalAgent(BaseContextAgent):
         # print(pos_z_loss, pos_cnt, neg_z_loss, neg_cnt)
         return pos_z_loss / (pos_cnt + epsilon) + neg_z_loss / (neg_cnt + epsilon)
 
+    @classmethod
+    def load_from(cls, path: str):
+        state_dict = torch.load(path)
+        agent = cls(
+            state_dict["context_dim"],
+            state_dict["latent_dim"],
+            state_dict["encoder_hidden_dims"],
+        )
+        agent.load_state_dict(state_dict)
+        return agent
+
 
 class ClassifierAgent(BaseContextAgent):
     def __init__(
@@ -127,6 +138,19 @@ class ClassifierAgent(BaseContextAgent):
         # Compute the encoder loss
         latent_zs = self.encoder(context)
         return latent_zs
+
+    @classmethod
+    def load_from(cls, path: str):
+        state_dict = torch.load(path)
+        agent = cls(
+            state_dict["context_dim"],
+            state_dict["latent_dim"],
+            state_dict["encoder_hidden_dims"],
+            state_dict["num_classes"],
+            state_dict["classifier_hidden_dims"],
+        )
+        agent.load_state_dict(state_dict)
+        return agent
 
 
 class UnicornAgent(FocalAgent):
@@ -177,6 +201,21 @@ class UnicornAgent(FocalAgent):
         latent_zs = self.encoder(context)
         return latent_zs
 
+    @classmethod
+    def load_from(cls, path: str):
+        state_dict = torch.load(path)
+        agent = cls(
+            state_dict["context_dim"],
+            state_dict["latent_dim"],
+            state_dict["encoder_hidden_dims"],
+            state_dict["state_dim"],
+            state_dict["action_dim"],
+            state_dict["decoder_hidden_dims"],
+            state_dict["unicorn_alpha"],
+        )
+        agent.load_state_dict(state_dict)
+        return agent
+
 
 class CertainAgent(nn.Module):
     def __init__(
@@ -200,9 +239,9 @@ class CertainAgent(nn.Module):
             "recon_decoder_hidden_dims", torch.tensor(recon_decoder_hidden_dims)
         )
         self.loss_predictor = MLP(
-            input_dim=context_dim + latent_dim,
+            input_dim=context_dim,
             hidden_dims=loss_predictor_hidden_dims,
-            output_dim=latent_dim,
+            output_dim=1,
         )
         self.recon_decoder = MLP(
             input_dim=state_dim + action_dim + latent_dim,
@@ -211,8 +250,7 @@ class CertainAgent(nn.Module):
         )
 
     def compute_loss(self, context, latent_zs, target_loss):
-        predictor_input = torch.cat([context, latent_zs], dim=-1)
-        pred_loss = torch.mean(self.loss_predictor(predictor_input))
+        pred_loss = torch.mean(self.loss_predictor(context))
         loss_loss = torch.mean((pred_loss - target_loss) ** 2)
         recon_input = torch.cat(
             [
@@ -230,9 +268,7 @@ class CertainAgent(nn.Module):
     @torch.no_grad()
     def get_restraint_latent(self, context, latent_zs):
         # shape batch * dim
-        pred_loss = torch.mean(
-            self.loss_predictor(torch.cat([context, latent_zs], dim=-1)), dim=-1
-        )
+        pred_loss = torch.mean(self.loss_predictor(context), dim=-1)
         pred_rns = self.recon_decoder(
             torch.cat(
                 [
@@ -250,6 +286,43 @@ class CertainAgent(nn.Module):
         weights = torch.softmax(-pred_loss, dim=0).reshape(-1, 1)
         restraint_latent_z = torch.sum(latent_zs * weights, dim=0).reshape(1, -1)
         return restraint_latent_z
+
+    @torch.no_grad()
+    def predict_loss(self, context, latent_zs):
+        # shape batch * dim
+        pred_loss = self.loss_predictor(context)
+        return pred_loss
+
+    @torch.no_grad()
+    def recon_error(self, context, latent_zs):
+        recon_input = torch.cat(
+            [
+                context[..., : self.state_dim + self.action_dim],
+                latent_zs,
+            ],
+            dim=-1,
+        )
+        pred_rns = self.recon_decoder(recon_input)
+        recon_error = torch.mean(
+            (pred_rns - context[..., self.state_dim + self.action_dim :]) ** 2,
+            dim=-1,
+            keepdim=True,
+        )
+        return recon_error
+
+    @classmethod
+    def load_from(cls, path: str):
+        state_dict = torch.load(path)
+        agent = cls(
+            state_dict["state_dim"],
+            state_dict["action_dim"],
+            state_dict["context_dim"],
+            state_dict["latent_dim"],
+            state_dict["loss_predictor_hidden_dims"],
+            state_dict["recon_decoder_hidden_dims"],
+        )
+        agent.load_state_dict(state_dict)
+        return agent
 
 
 class TD3BCAgent(nn.Module):

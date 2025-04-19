@@ -147,6 +147,10 @@ class OfflineMetaDataset(torch.utils.data.Dataset):
             "infos": infos,
         }
 
+    @property
+    def tasks(self):
+        return [float(task) for task in self.data.keys()]
+
     def sample(self, task, batch_size):
         task_data = self.data[str(task)]
         indices = np.random.choice(len(task_data["observations"]), batch_size)
@@ -163,6 +167,35 @@ class OfflineMetaDataset(torch.utils.data.Dataset):
             "next_observations": torch.tensor(next_observations),
             "dones": torch.tensor(dones),
             "infos": infos,
+        }
+
+    def sample_all(self, batch_size):
+        all_data = {
+            key: []
+            for key in [
+                "observations",
+                "actions",
+                "rewards",
+                "next_observations",
+                "dones",
+                "infos",
+            ]
+        }
+        for task_data in self.data.values():
+            indices = np.random.choice(len(task_data["observations"]), batch_size)
+            for key in all_data:
+                all_data[key].append(
+                    task_data[key][indices]
+                    if key != "infos"
+                    else [task_data[key][i] for i in indices]
+                )
+        return {
+            key: (
+                torch.tensor(np.stack(all_data[key]))
+                if key != "infos"
+                else all_data[key]
+            )
+            for key in all_data
         }
 
     @staticmethod
