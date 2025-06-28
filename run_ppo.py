@@ -14,7 +14,7 @@ import rl.pytorch_utils as ptu
 from rl.algorithm.ppo import PPOAgent, PPOArgs, PPORunner
 
 os.environ["MUJOCO_GL"] = "osmesa"  # 使用 osmesa 渲染
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
 
 
 def train_task(config, task_idx):

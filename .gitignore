@@ -5,3 +5,5 @@ videos
 logs
 runs
 cleanrl
+label_free
+my_tmp

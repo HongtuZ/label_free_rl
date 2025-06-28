@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import rl.pytorch_utils as ptu
+from rl.helper import IQR, ModifiedZScore
 from rl.net.agent import (
     CertainAgent,
     ClassifierAgent,
@@ -52,9 +53,12 @@ class CERTAINArgs:
     decoder_hidden_dims: list = None
     unicorn_alpha: float = 1.0
     # ----------------------CERTAIN---------------------------
-    enable_certain: bool = True
+    enable_certain_restraint: bool = True
     loss_predictor_hidden_dims: list = None
     recon_decoder_hidden_dims: list = None
+    train_z0_policy: bool = True  # whether to train the z0 policy
+    certain_beta: float = 1.0  # uncertainty punish weight in z0 policy
+    certain_tau: float = 0.1  # restraint temperature
     # --------------------------------------------------------
     #                      TD3+BC agent
     # --------------------------------------------------------
@@ -96,18 +100,18 @@ class CERTAINRunner:
             else self.state_dim + self.action_dim + 1
         )
         # Certain agent to learn the latent restraint stratage
-        if args.enable_certain:
-            self.certain_agent = CertainAgent(
-                state_dim=self.state_dim,
-                action_dim=self.action_dim,
-                context_dim=self.context_dim,
-                latent_dim=args.latent_dim,
-                loss_predictor_hidden_dims=args.loss_predictor_hidden_dims,
-                recon_decoder_hidden_dims=args.recon_decoder_hidden_dims,
-            ).to(ptu.device)
-            self.certain_optimizer = optim.Adam(
-                self.certain_agent.parameters(), lr=args.encoder_learning_rate, eps=1e-5
-            )
+        self.certain_agent = CertainAgent(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            context_dim=self.context_dim,
+            latent_dim=args.latent_dim,
+            loss_predictor_hidden_dims=args.loss_predictor_hidden_dims,
+            recon_decoder_hidden_dims=args.recon_decoder_hidden_dims,
+            certain_tau=args.certain_tau,
+        ).to(ptu.device)
+        self.certain_optimizer = optim.Adam(
+            self.certain_agent.parameters(), lr=args.encoder_learning_rate, eps=1e-5
+        )
         # Context agent to infer the latent variable
         if args.context_agent_type == "focal":
             self.context_agent = FocalAgent(
@@ -177,7 +181,6 @@ class CERTAINRunner:
             num_workers=8,
             collate_fn=ptu.OfflineMetaDataset.collate_fn,
         )
-        tasks = [float(info["task"]) for info in dataloader.dataset[0]["infos"]]
 
         # ALGO Logic: training setup
         global_step = 0
@@ -205,22 +208,41 @@ class CERTAINRunner:
                 context_loss.backward()
                 self.context_optimizer.step()
 
-                if self.args.enable_certain:
-                    # Update certain agent
-                    certain_loss = self.certain_agent.compute_loss(
-                        context, latent_zs.detach(), context_loss.detach()
-                    )
-                    self.certain_optimizer.zero_grad()
-                    certain_loss.backward()
-                    self.certain_optimizer.step()
-
-                # Update TD3+BC
+                # Update certain agent
+                certain_loss, pred_loss, recon_loss = self.certain_agent.compute_loss(
+                    context, latent_zs.detach(), context_loss.detach()
+                )
+                self.certain_optimizer.zero_grad()
+                certain_loss.backward()
+                self.certain_optimizer.step()
+                # if self.args.enable_certain_restraint:
+                #     # Restraint latent_z
+                #     pred_loss = (pred_loss - pred_loss.mean())/pred_loss.std()
+                #     w = torch.softmax(-pred_loss/self.args.certain_tau, dim=1)
+                #     latent_z = torch.sum(w * latent_zs, dim=1, keepdim=True).expand_as(latent_zs).detach()
+                #     # Construct policy training data to punish pred_loss in z0
+                #     if self.args.train_z0_policy:
+                #         observations = observations.repeat(2,1,1)
+                #         actions = actions.repeat(2,1,1)
+                #         next_observations = next_observations.repeat(2,1,1)
+                #         dones = dones.repeat(2,1,1)
+                #         z0_rewards = rewards - self.args.certain_beta * pred_loss.detach()
+                #         rewards = torch.cat([rewards, z0_rewards], dim=0)
+                #         latent_z0 = ptu.zeros_like(latent_z)
+                #         latent_z = torch.cat([latent_z, latent_z0], dim=0)
+                # else:
+                #     latent_z = (
+                #         torch.mean(latent_zs, dim=1, keepdim=True)
+                #         .expand_as(latent_zs)
+                #         .detach()
+                #     )
                 latent_z = (
                     torch.mean(latent_zs, dim=1, keepdim=True)
                     .expand_as(latent_zs)
                     .detach()
                 )
 
+                # Update TD3+BC
                 critic_loss, actor_loss = self.policy_agent.update(
                     torch.cat([observations, latent_z], dim=-1),
                     actions,
@@ -243,16 +265,17 @@ class CERTAINRunner:
                     self.writer.add_scalar(
                         "Loss/actor_loss", actor_loss.item(), global_step
                     )
-                if self.args.enable_certain:
-                    self.writer.add_scalar(
-                        "Loss/certain_loss", context_loss.item(), global_step
-                    )
+                self.writer.add_scalar(
+                    "Loss/certain_loss", context_loss.item(), global_step
+                )
             # ALGO Logic: eval
             if (
                 iteration % self.args.eval_interval == 0
                 or iteration == self.args.num_iterations - 1
             ):
-                self.eval(tasks, dataloader.dataset, global_step)
+                if self.args.enable_certain_restraint:
+                    self.update_uncertainty_range(dataloader.dataset)
+                self.eval(dataloader.dataset, global_step)
             # ALGO Logic: save the model
             if (
                 iteration % self.args.save_interval == 0
@@ -264,15 +287,34 @@ class CERTAINRunner:
                 policy_agent_path = (
                     self.log_dir / f"checkpoints/policy_agent_{global_step}.pth"
                 )
+                certain_agent_path = (
+                    self.log_dir / f"checkpoints/certain_agent_{global_step}.pth"
+                )
                 context_agent_path.parent.mkdir(parents=True, exist_ok=True)
-                policy_agent_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(self.context_agent.state_dict(), str(context_agent_path))
                 torch.save(self.policy_agent.state_dict(), str(policy_agent_path))
-                if self.args.enable_certain:
-                    certain_agent_path = (
-                        self.log_dir / f"checkpoints/certain_agent_{global_step}.pth"
-                    )
-                    torch.save(self.certain_agent.state_dict(), str(certain_agent_path))
+                torch.save(self.certain_agent.state_dict(), str(certain_agent_path))
+
+    def update_uncertainty_range(self, dataset):
+        all_data = dataset.all_data
+        all_context = torch.cat(
+            [
+                all_data["observations"],
+                all_data["actions"],
+                all_data["rewards"],
+                all_data["next_observations"],
+            ],
+            dim=-1,
+        ).to(ptu.device)
+        all_latent_zs = self.context_agent.infer_latent(all_context)
+        all_pred_losses = self.certain_agent.predict_loss(
+            all_context, all_latent_zs
+        ).reshape(-1, 1)
+        all_recon_errors = self.certain_agent.recon_error(
+            all_context, all_latent_zs
+        ).reshape(-1, 1)
+        self.pred_loss_range = ModifiedZScore(all_pred_losses).range()
+        self.recon_error_range = ModifiedZScore(all_recon_errors).range()
 
     def online_collect_traj(self, task, latent_z, episode_steps):
         observations = []
@@ -300,12 +342,17 @@ class CERTAINRunner:
     def eval_task_with_context(self, task, context, context_type="online"):
         context = context[..., : self.context_dim].reshape(-1, self.context_dim)
         latent_zs = self.context_agent.infer_latent(context)
-        if self.args.enable_certain and context_type == "online":
-            latent_z = self.certain_agent.get_restraint_latent(context, latent_zs)
+        if self.args.enable_certain_restraint and context_type == "online":
+            latent_z = self.certain_agent.get_restraint_latent(
+                context,
+                latent_zs,
+                pred_loss_range=self.pred_loss_range,
+                recon_error_range=self.recon_error_range,
+            )
         else:
             latent_z = latent_zs.mean(dim=0, keepdim=True)
-        first_traj = self.online_collect_traj(task, latent_z, self.args.eval_num_steps)
-        observations, actions, rewards, next_observations = first_traj
+        traj = self.online_collect_traj(task, latent_z, self.args.eval_num_steps)
+        observations, actions, rewards, next_observations = traj
         return np.mean(np.sum(rewards, axis=1))
 
     def eval_task(self, task, dataset=ptu.OfflineMetaDataset):
@@ -347,9 +394,10 @@ class CERTAINRunner:
         one_shot_return = np.mean(one_shot_returns)
         return offline_return, zero_shot_return, one_shot_return
 
-    def eval(self, tasks: list, dataset: ptu.OfflineMetaDataset, global_step: int):
+    @torch.no_grad()
+    def eval(self, dataset: ptu.OfflineMetaDataset, global_step: int):
         offline_returns, zero_shot_returns, one_shot_returns = [], [], []
-        for task in tasks:
+        for task in dataset.tasks:
             offline_return, zero_shot_return, one_shot_return = self.eval_task(
                 task, dataset
             )

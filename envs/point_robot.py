@@ -23,12 +23,7 @@ class PointEnv(gym.Env):
         self.window = None
         self.clock = None
 
-    def reset(
-        self,
-        *,
-        seed: Optional[int] = None,
-        options: Optional[dict] = None,
-    ):
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None,):
         super().reset(seed=seed)
         task = options.get("task", None) if options is not None else None
         if task is not None:

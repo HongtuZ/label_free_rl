@@ -3,7 +3,6 @@ from gymnasium.envs.mujoco.ant_v5 import AntEnv
 
 
 class AntDirEnv(AntEnv):
-
     def __init__(self, task, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.task = task

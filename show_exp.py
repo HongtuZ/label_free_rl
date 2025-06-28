@@ -34,6 +34,8 @@ def plot_certain_loss(
         zip([pred_losses, recon_errors], ["Predict Loss", "Recon Error"]), 1
     ):
         plt.subplot(1, 2, i)
+        plt.xlim(-1.2, 1.2)  # 调整 x 轴范围
+        plt.ylim(-1.2, 1.2)
         plt.title(label)
         plt.gca().add_artist(plt.Circle((0, 0), 1, color="gray", fill=False))
         plt.plot(0, 0, marker="*", markersize=6, color="green", markerfacecolor="none")
@@ -48,7 +50,7 @@ def plot_certain_loss(
         plt.scatter(xs, ys, c=data, cmap="coolwarm", s=1)
         plt.gca().set_aspect("equal", adjustable="box")
         plt.gca().axis("off")
-        cbar = plt.colorbar(orientation="horizontal", pad=0.01)
+        cbar = plt.colorbar(orientation="horizontal", pad=0.00, fraction=0.1)
         if cbar_ranges:
             cbar.mappable.set_clim(*cbar_ranges[i - 1])
         cbar.set_ticks(np.linspace(cbar.vmin, cbar.vmax, num=2))
@@ -108,6 +110,31 @@ def show_uncertainty(config_path, checkpoint_dir, step):
 
     certain_agent.to(ptu.device)
     context_agent.to(ptu.device)
+
+    # Calculate the certain loss mean and std
+    all_data = dataset.all_data
+    all_context = torch.cat(
+        [
+            all_data["observations"],
+            all_data["actions"],
+            all_data["rewards"],
+            all_data["next_observations"],
+        ],
+        dim=-1,
+    ).to(ptu.device)
+    all_latent_zs = context_agent.infer_latent(all_context)
+    all_pred_losses = certain_agent.predict_loss(all_context, all_latent_zs)
+    all_recon_errors = certain_agent.recon_error(all_context, all_latent_zs)
+    pred_loss_min = torch.min(all_pred_losses).item()
+    pred_loss_mean = torch.mean(all_pred_losses).item()
+    recon_error_min = torch.min(all_recon_errors).item()
+    recon_error_mean = torch.mean(all_recon_errors).item()
+    cbar_ranges = [
+        (pred_loss_min, pred_loss_mean + pred_loss_mean - pred_loss_min),
+        (recon_error_min, recon_error_mean + recon_error_mean - recon_error_min),
+    ]
+
+    # sample and plot
     data = dataset.sample_all(50)
 
     def compute_and_plot(
@@ -127,6 +154,7 @@ def show_uncertainty(config_path, checkpoint_dir, step):
         pred_losses = ptu.get_numpy(
             certain_agent.predict_loss(context, latent_zs)
         ).reshape(-1)
+        pred_losses[pred_losses < cbar_ranges[0][0]] = cbar_ranges[0][1]
         recon_errors = ptu.get_numpy(
             certain_agent.recon_error(context, latent_zs)
         ).reshape(-1)
@@ -147,7 +175,7 @@ def show_uncertainty(config_path, checkpoint_dir, step):
     task_goals = np.expand_dims(
         np.array([(np.cos(task), np.sin(task)) for task in dataset.tasks]), axis=1
     )
-    cbar_ranges = compute_and_plot(
+    compute_and_plot(
         "ID-task ID-context",
         data["observations"].to(ptu.device),
         data["actions"].to(ptu.device),
@@ -155,6 +183,7 @@ def show_uncertainty(config_path, checkpoint_dir, step):
         data["next_observations"].to(ptu.device),
         task_goals,
         f"id-task-id-context_{step}.png",
+        cbar_ranges=cbar_ranges,
     )
 
     ood_observations, ood_actions, ood_next_observations = (

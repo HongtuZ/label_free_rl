@@ -2,8 +2,8 @@ EnvArgs:
   # --------------------------------------------------------
   #                      Environment setting
   # --------------------------------------------------------
-  env_id: ant-dir  # name of the environment
-  tasks: np.linspace(0, np.pi, 10) # direction radian: 0~2pi
+  env_id: half-cheetah-vel  # name of the environment
+  tasks: np.linspace(0, 3.0, 10) # direction radian: 0~2pi
   num_train_envs: 2  # number of parallel training environments
   num_eval_envs: 2  # number of parallel evaluation environments
 
@@ -11,8 +11,8 @@ CERTAINArgs:
   # --------------------------------------------------------
   #                      Training setting
   # --------------------------------------------------------
-  log_dir: logs/certain/ant-dir
-  dataset_dir: dataset/ant-dir
+  log_dir: logs/certain/half-cheetah-vel
+  dataset_dir: dataset/half-cheetah-vel
   seed: 1
   batch_size: 256  # batch size for training
   num_iterations: 100  # total training iterations
@@ -60,7 +60,7 @@ PPOArgs:
   # --------------------------------------------------------
   #                      Training setting
   # --------------------------------------------------------
-  log_dir: logs/ant-dir
+  log_dir: logs/half-cheetah-vel
   seed: 0
   num_steps: 256  # number of env rollout steps per iteration
   num_iterations: 5000  # total training iterations
